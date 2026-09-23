@@ -1,6 +1,10 @@
-# Add Python dependencies here.
 pandas
 pytest
 rapidfuzz
 PyYAML
 lark
+langgraph
+langchain-core
+langchain-groq
+python-dotenv
+pydantic
