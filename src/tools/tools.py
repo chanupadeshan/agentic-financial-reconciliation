@@ -167,3 +167,26 @@ def search_vendor_transactions(vendor_name:str,invoices: pd.DataFrame,ledger_ent
         "ledger_entries": ledger_matches,
         "bank_transactions": bank_matches
     }
+
+
+def get_bank_transaction(transaction_id:str,bank_transactions:pd.DataFrame) -> dict|None:
+    """
+        Find one bank transaction using its transaction ID.
+
+        Example:
+            transaction_id = "BANK-2026-000001"
+
+        Returns:
+            dict:
+                The bank transaction record if found.
+
+            None:
+                If the bank transaction does not exist.
+    """
+
+    match = bank_transactions[bank_transactions["transaction_id"].fillna("").astype(str).eq(str(transaction_id))]
+
+    if match.empty:
+        return None
+
+    return match.iloc[0].to_dict()
