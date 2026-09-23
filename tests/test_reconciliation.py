@@ -24,10 +24,12 @@ def make_invoice(invoice_id="INV-2026-000001",amount=1000.0,currency="USD",vendo
 def make_ledger_df(rows=None):
     if rows is None:
         rows = []
+    rows = [{"vendor": "ABC Technologies Ltd", **row} for row in rows]
     columns = [
             "ledger_entry_id",
             "invoice_id",
             "reference",
+            "vendor",
             "amount",
             "currency",
             "date"
@@ -513,6 +515,7 @@ def test_reconcile_invoice_name_variation():
                 "ledger_entry_id": "LED-001",
                 "invoice_id": "INV-2026-000001",
                 "reference": "INV-2026-000001",
+                "vendor": "Nova Systems Ltd",
                 "amount": 1000.00,
                 "currency": "USD",
                 "date": "2026-09-01",
@@ -575,6 +578,53 @@ def test_reconcile_invoice_vendor_mismatch():
 
     assert result["scenario"] == "vendor_mismatch"
     assert result["action"] == "MANUAL_REVIEW_VENDOR_MISMATCH"
+
+
+@pytest.mark.parametrize(
+    "ledger_vendor, expected_scenario",
+    [
+        (pd.NA, "vendor_name_missing"),
+        ("Unrelated Supplier", "vendor_mismatch"),
+    ],
+)
+def test_reconcile_invoice_checks_ledger_vendor(
+    ledger_vendor, expected_scenario
+):
+    invoice = make_invoice(vendor="ABC Technologies Ltd")
+    ledgers = make_ledger_df(
+        [
+            {
+                "ledger_entry_id": "LED-001",
+                "invoice_id": "INV-2026-000001",
+                "reference": "INV-2026-000001",
+                "vendor": ledger_vendor,
+                "amount": 1000.00,
+                "currency": "USD",
+                "date": "2026-09-01",
+            }
+        ]
+    )
+    banks = make_bank_df(
+        [
+            {
+                "transaction_id": "BNK-001",
+                "reference": "INV-2026-000001",
+                "amount": 1000.00,
+                "currency": "USD",
+                "date": "2026-09-01",
+                "vendor": "ABC Technologies Ltd",
+                "description": "Vendor payment",
+            }
+        ]
+    )
+
+    result = reconcile_invoice(invoice, ledgers, banks)
+
+    assert result["scenario"] == expected_scenario
+    if expected_scenario == "vendor_name_missing":
+        assert result["vendor_similarity"] is None
+    else:
+        assert result["vendor_similarity"] < 0.70
 
 
 def test_reconcile_invoice_exact_match():

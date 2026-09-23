@@ -325,17 +325,18 @@ def reconcile_invoice(invoice: pd.Series,ledger_entries: pd.DataFrame,bank_trans
         }
 
     ## Vendor name variation
+    ledger_vendor = ledger["vendor"]
     bank_vendor = bank["vendor"]
 
-    similarity = vendor_similarity(
-        invoice_vendor,
-        bank_vendor
-    )
+    ledger_similarity = vendor_similarity(invoice_vendor, ledger_vendor)
+    bank_similarity = vendor_similarity(invoice_vendor, bank_vendor)
 
     invoice_vendor_basic = str(invoice_vendor).strip().upper()
+    ledger_vendor_basic = str(ledger_vendor).strip().upper()
     bank_vendor_basic = str(bank_vendor).strip().upper()
 
-    if similarity is None:
+    ## Missing vendor name
+    if ledger_similarity is None or bank_similarity is None:
         return {
             "invoice_id": invoice_id,
             "scenario": "vendor_name_missing",
@@ -345,23 +346,29 @@ def reconcile_invoice(invoice: pd.Series,ledger_entries: pd.DataFrame,bank_trans
             "bank_transaction_ids": bank_ids
         }
 
-    if (invoice_vendor_basic != bank_vendor_basic and similarity >= 0.70):
-        return {
-            "invoice_id": invoice_id,
-            "scenario": "name_variation",
-            "action": "AUTO_RECONCILE_OR_LOW_RISK_REVIEW",
-            "vendor_similarity": similarity,
-            "ledger_entry_ids": ledger_ids,
-            "bank_transaction_ids": bank_ids
-        }
-
     ## Large vendor mismatch
-    if similarity < 0.70:
+    if ledger_similarity < 0.70 or bank_similarity < 0.70:
         return {
             "invoice_id": invoice_id,
             "scenario": "vendor_mismatch",
             "action": "MANUAL_REVIEW_VENDOR_MISMATCH",
-            "vendor_similarity": similarity,
+            "vendor_similarity": min(ledger_similarity, bank_similarity),
+            "ledger_entry_ids": ledger_ids,
+            "bank_transaction_ids": bank_ids
+        }
+
+    ## Vendor name variation
+    vendor_name_changed = (
+        invoice_vendor_basic != ledger_vendor_basic
+        or invoice_vendor_basic != bank_vendor_basic
+    )
+
+    if vendor_name_changed:
+        return {
+            "invoice_id": invoice_id,
+            "scenario": "name_variation",
+            "action": "AUTO_RECONCILE_OR_LOW_RISK_REVIEW",
+            "vendor_similarity": min(ledger_similarity, bank_similarity),
             "ledger_entry_ids": ledger_ids,
             "bank_transaction_ids": bank_ids
         }
@@ -371,7 +378,7 @@ def reconcile_invoice(invoice: pd.Series,ledger_entries: pd.DataFrame,bank_trans
         "invoice_id": invoice_id,
         "scenario": "exact",
         "action": "AUTO_RECONCILE",
-        "vendor_similarity": similarity,
+        "vendor_similarity": min(ledger_similarity, bank_similarity),
         "ledger_entry_ids": ledger_ids,
         "bank_transaction_ids": bank_ids
     }

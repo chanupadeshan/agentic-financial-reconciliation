@@ -131,8 +131,8 @@ def test_get_reconciliation_result():
 
     assert result is not None
     assert result["invoice_id"] == "INV-2026-000001"
-    assert result["scenario"] == "exact"
-    assert result["action"] == "AUTO_RECONCILE"
+    assert result["scenario"] == "name_variation"
+    assert result["action"] == "AUTO_RECONCILE_OR_LOW_RISK_REVIEW"
 
 
 def test_get_reconciliation_result_invoice_not_found():

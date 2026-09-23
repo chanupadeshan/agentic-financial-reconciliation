@@ -1,15 +1,17 @@
 import os
+from datetime import datetime, timezone
 
 import pandas as pd
 from dotenv import load_dotenv
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
 from langgraph.types import interrupt
 
 from .prompts import (
     INVESTIGATION_SYSTEM_PROMPT,
     InvestigationOutput,
+    TOOL_AGENT_SYSTEM_PROMPT,
     build_investigation_prompt,
 )
 from .state import AgentState
@@ -22,7 +24,7 @@ from ..tools.tools import (
     get_reconciliation_result,
 )
 
-load_dotenv()
+load_dotenv(override=True)
 
 
 ## LLM
@@ -39,16 +41,29 @@ def build_invoice_evidence(
     bank_transactions: list,
     reconciliation_result: dict | None,
 ) -> dict:
-    """collect the important information about one reconciliation case into one dictionary.
-       it stores the invoice, ledger entries ids, bank transactions ids and the reconciliation result."""
+    """Build compact evidence suitable for an LLM request."""
+
+    invoice = invoice or {}
+    result = reconciliation_result or {}
 
     return {
-        "invoice": invoice,
-        "ledger_entry_ids": [entry.get("ledger_entry_id") for entry in ledger_entries],
-        "bank_transaction_ids": [entry.get("transaction_id") for entry in bank_transactions],
-        "reconciliation_result": reconciliation_result,
+        "invoice_id": invoice.get("invoice_id"),
+        "vendor": invoice.get("vendor"),
+        "invoice_amount": invoice.get("amount"),
+        "invoice_currency": invoice.get("currency"),
+        "invoice_date": invoice.get("date"),
+        "ledger_entry_ids": [
+            entry.get("ledger_entry_id") for entry in ledger_entries
+        ],
+        "bank_transaction_ids": [
+            entry.get("transaction_id") for entry in bank_transactions
+        ],
+        "ledger_entry_count": len(ledger_entries),
+        "bank_transaction_count": len(bank_transactions),
+        "scenario": result.get("scenario"),
+        "action": result.get("action"),
+        "vendor_similarity": result.get("vendor_similarity"),
     }
-
 
 def create_load_case_node(
     invoices: pd.DataFrame,
@@ -153,9 +168,16 @@ def create_load_case_node(
                 }
 
                 evidence = {
-                    "bank_transaction": bank,
+                    "bank_transaction_id": bank.get("transaction_id"),
+                    "vendor": bank.get("vendor"),
+                    "bank_amount": bank.get("amount"),
+                    "currency": bank.get("currency"),
+                    "transaction_date": bank.get("date"),
+                    "reference": bank.get("reference"),
+                    "description": bank.get("description"),
                     "extracted_invoice_id": extracted_invoice_id,
-                    "reconciliation_result": result,
+                    "scenario": result.get("scenario"),
+                    "action": result.get("action"),
                 }
 
                 return {
@@ -200,12 +222,8 @@ def route_case(state: AgentState):
     if scenario in ["exact", "split_payment", "unpaid"]:
         return "auto"
 
-    ## cases where LLM investigation is needed
-    if scenario in ["name_variation", "date_shift", "bank_fee"]:
-        return "investigate"
-
-    ## higher-risk case
-    return "human_review"
+    ## every anomaly is investigated before human review
+    return "investigate"
 
 
 ## auto finalize
@@ -235,15 +253,94 @@ def auto_finalize(state: AgentState):
     }
 
 
-## LLM investigation node
-def investigate_case(state: AgentState):
-    """
-    investigate_case node uses an LLM to analyze the reconciliation case and provide investigation notes and a recommendation.
-    It returns the investigation notes, recommendation, and indicates that human review is needed.
-    """
-    
+## LLM investigation nodes
+def prepare_investigation(state: AgentState):
+    """Seed the tool-calling conversation with the current case."""
+
+    message = HumanMessage(
+        content=f"""
+Investigate this reconciliation case.
+
+Invoice ID:
+{state.get("invoice_id")}
+
+Bank Transaction ID:
+{state.get("bank_transaction_id")}
+
+Reconciliation Result:
+{state.get("reconciliation_result")}
+
+Current Evidence:
+{state.get("evidence")}
+
+Use the available tools if additional evidence would help investigate
+the case. Stop when the available evidence is sufficient.
+"""
+    )
+
+    return {"messages": [message]}
+
+
+def create_investigation_agent(tools):
+    """Create the model node that dynamically chooses investigation tools."""
+
+    model_with_tools = llm.bind_tools(tools)
+
+    def investigation_agent(state: AgentState):
+        try:
+            response = model_with_tools.invoke(
+                [
+                    SystemMessage(content=TOOL_AGENT_SYSTEM_PROMPT),
+                    *state.get("messages", []),
+                ]
+            )
+        except Exception as error:
+            response = AIMessage(
+                content=(
+                    "No additional tool evidence was gathered because the "
+                    f"tool-selection step failed: {error}"
+                )
+            )
+
+        return {"messages": [response]}
+
+    return investigation_agent
+
+
+def continue_investigation(state: AgentState):
+    """Route model tool calls to ToolNode until the model is finished."""
+
+    messages = state.get("messages", [])
+    if not messages:
+        return "finish"
+
+    last_message = messages[-1]
+    if getattr(last_message, "tool_calls", None):
+        return "tools"
+
+    return "finish"
+
+
+def finalize_investigation(state: AgentState):
+    """Create the structured report after dynamic evidence gathering."""
+
     try:
-        prompt = build_investigation_prompt(state)
+        messages = state.get("messages", [])
+        recent_messages = messages[-6:]
+        tool_history = "\n\n".join(
+            str(message.content)[:3000]
+            for message in recent_messages
+            if message.content
+        )
+
+        combined_evidence = {
+            "original_evidence": state.get("evidence"),
+            "tool_evidence": tool_history,
+        }
+        prompt_state = dict(state)
+        prompt_state["evidence"] = combined_evidence
+        prompt = build_investigation_prompt(prompt_state)
+
         result = structured_llm.invoke(
             [
                 SystemMessage(content=INVESTIGATION_SYSTEM_PROMPT),
@@ -259,15 +356,14 @@ def investigate_case(state: AgentState):
             "error_message": None,
         }
 
-    except Exception as e:
+    except Exception as error:
         return {
             "route": "investigate",
             "investigation_notes": "Automated investigation failed.",
             "recommendation": "Perform manual review.",
             "needs_human_review": True,
-            "error_message": f"LLM investigation failed: {e}",
+            "error_message": f"LLM investigation failed: {error}",
         }
-
 
 ## human review node
 def human_review_case(state: AgentState):
@@ -284,17 +380,22 @@ def human_review_case(state: AgentState):
             "evidence": state.get("evidence"),
             "investigation_notes": state.get("investigation_notes"),
             "recommendation": state.get("recommendation"),
+            "message": "Human review is required.",
             "error_message": state.get("error_message"),
             "options": ["approve", "reject"],
         }
     )
 
-    decision = review.get("decision")
-    comment = review.get("comment")
+    decision = review.get("decision", "reject")
+    reviewed_by = review.get("reviewed_by", "Unknown")
+    comment = review.get("comment", "")
     approved = str(decision).lower() == "approve"
+    reviewed_at = datetime.now(timezone.utc).isoformat()
 
     return {
         "approved": approved,
+        "reviewed_by": reviewed_by,
+        "reviewed_at": reviewed_at,
         "human_comment": comment,
         "needs_human_review": False,
     }
