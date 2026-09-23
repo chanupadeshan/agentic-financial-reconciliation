@@ -1,4 +1,7 @@
-from typing import TypedDict
+from typing import Annotated, TypedDict
+
+from langchain_core.messages import AnyMessage
+from langgraph.graph.message import add_messages
 
 
 class AgentState(TypedDict, total=False):
@@ -28,6 +31,8 @@ class AgentState(TypedDict, total=False):
 
     # Human review
     approved: bool | None
+    reviewed_by: str | None
+    reviewed_at: str | None
     human_comment: str | None
 
     # Error handling
@@ -35,3 +40,6 @@ class AgentState(TypedDict, total=False):
 
     # Final result
     final_status: str
+
+    # Agent tool-calling conversation
+    messages: Annotated[list[AnyMessage], add_messages]
